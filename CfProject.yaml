@@ -1,0 +1,122 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources :
+    cfApi :
+        Type : 'AWS::ApiGateway::RestApi'
+        Properties :
+            Name : cfApi
+            EndpointConfiguration:
+                Types:
+                  - REGIONAL
+    
+    ResourceForApi:
+        Type: 'AWS::ApiGateway::Resource'
+        Properties:
+            RestApiId: !Ref cfApi
+            ParentId: !GetAtt 
+            - cfApi
+            - RootResourceId
+            PathPart: LambdaforApi
+        DependsOn: cfApi
+
+    MethodForApi:
+        Type: 'AWS::ApiGateway::Method'
+        Properties:
+            RestApiId: !Ref cfApi
+            ResourceId: !Ref ResourceForApi
+            HttpMethod: POST
+            AuthorizationType: NONE
+            Integration:
+                Type: AWS_PROXY
+                IntegrationHttpMethod: POST
+                Uri: !Sub
+                  - >-
+                    arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaforApiArn}/invocations
+                  - LambdaforApiArn: !GetAtt LambdaforApi.Arn
+        DependsOn: 
+            - ResourceForApi
+            - LambdaforApi
+
+    LambdaforApi:
+        Type: 'AWS::Lambda::Function'
+        Properties:
+            Runtime: python3.10
+            Role: !GetAtt RoleForApi.Arn
+            Handler: index.handler
+            Code:
+                ZipFile: |
+                    import json
+                    import boto3
+
+                    def handler(event, context):
+                        body = json.loads(event['body'])
+                        ddb = boto3.resource('dynamodb')
+                        table= ddb.Table('cfDDBTable')
+                        data = table.put_item(
+                            Item={
+                                'name': body.get('name')
+                            }
+                        )
+                        return {
+                                'statusCode': 200,
+                                'body': json.dumps({'message': 'Item added to DynamoDB successfully'})
+                            }
+
+            Description: Updates dynamodb table
+        DependsOn: RoleForApi
+
+    DynamoDBTable:
+        Type: 'AWS::DynamoDB::Table'
+        Properties:
+            AttributeDefinitions: 
+                - AttributeName: 'name'
+                  AttributeType: 'S'
+            KeySchema: 
+                - AttributeName: 'name'
+                  KeyType: 'HASH'
+            ProvisionedThroughput: 
+                ReadCapacityUnits: '1'
+                WriteCapacityUnits: '1'
+            TableName: "cfDDBTable"
+
+    RoleForApi:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                - Effect: Allow
+                  Action: 'sts:AssumeRole'
+                  Principal: 
+                    Service: 'lambda.amazonaws.com'
+            Policies:
+                - PolicyName: LambdaInvokePolicy
+                  PolicyDocument:
+                    Version: "2012-10-17"
+                    Statement:
+                      - Effect: Allow
+                        Action:
+                            - 'logs:CreateLogGroup'
+                            - 'logs:CreateLogStream'
+                            - 'logs:PutLogEvents'
+                        Resource: 'arn:aws:logs:*:*:*'
+                      - Effect: Allow
+                        Action:
+                            - 'dynamodb:PutItem'
+                        Resource: !GetAtt DynamoDBTable.Arn
+        DependsOn: DynamoDBTable
+
+    APIGatewayDeployment:
+        Type: 'AWS::ApiGateway::Deployment'
+        Properties:
+            RestApiId: !Ref cfApi
+            Description: cf deployment
+            StageName: cfStage
+        DependsOn: MethodForApi
+        
+    PermissionForApiGW:
+        Type: AWS::Lambda::Permission
+        Properties:
+            Action: 'lambda:InvokeFunction'
+            FunctionName: !GetAtt LambdaforApi.Arn
+            Principal: apigateway.amazonaws.com
+
